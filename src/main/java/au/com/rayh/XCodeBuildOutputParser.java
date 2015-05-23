@@ -22,18 +22,10 @@
  * THE SOFTWARE.
  */
 
-/*
- * To change this template, choose Tools | Templates
- * and open the template in the editor.
- */
-
 package au.com.rayh;
 
-import au.com.rayh.report.TestCase;
-import au.com.rayh.report.TestFailure;
-import au.com.rayh.report.TestSuite;
-import hudson.FilePath;
-import hudson.model.TaskListener;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -43,45 +35,60 @@ import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
 import javax.xml.bind.JAXBContext;
 import javax.xml.bind.JAXBException;
 import javax.xml.bind.Marshaller;
 
+import au.com.rayh.report.TestCase;
+import au.com.rayh.report.TestError;
+import au.com.rayh.report.TestFailure;
+import au.com.rayh.report.TestSuite;
+
 /**
- *
- * @author ray
+ * Parse Xcode output and transform into JUnit-style xml test result files.
+ * This utility class creates and manages a FilterOutputStream to parse the Xcode output to capture the
+ * results of ocunit tests. 
+ * @author John Bito <jwbito@gmail.com>
  */
+
 public class XCodeBuildOutputParser {
+
     private static DateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss z");
-    private static Pattern START_SUITE = Pattern.compile("Test Suite '(\\S+)'.*started at\\s+(.*)");
-    private static Pattern END_SUITE = Pattern.compile("Test Suite '(\\S+)'.*finished at\\s+(.*).");
+    private static Pattern START_SUITE = Pattern.compile("Test Suite '([^/].+)'.*started at\\s+(.*)");
+    private static Pattern END_SUITE = Pattern.compile("Test Suite '([^/].+)'.*\\S+ at\\s+(.*).");
     private static Pattern START_TESTCASE = Pattern.compile("Test Case '-\\[\\S+\\s+(\\S+)\\]' started.");
     private static Pattern END_TESTCASE = Pattern.compile("Test Case '-\\[\\S+\\s+(\\S+)\\]' passed \\((.*) seconds\\).");
     private static Pattern ERROR_TESTCASE = Pattern.compile("(.*): error: -\\[(\\S+) (\\S+)\\] : (.*)");
     private static Pattern FAILED_TESTCASE = Pattern.compile("Test Case '-\\[\\S+ (\\S+)\\]' failed \\((\\S+) seconds\\).");
     private static Pattern FAILED_WITH_EXIT_CODE = Pattern.compile("failed with exit code (\\d+)");
+    private static Pattern TERMINATING_EXCEPTION = Pattern.compile(".*\\*\\*\\* Terminating app due to uncaught exception '(\\S+)', reason: '(.+[^\\\\])'.*");
+    private File testReportsDir;
+    protected OutputStream captureOutputStream;
+    protected int exitCode;
+    protected TestSuite currentTestSuite;
+    protected TestCase currentTestCase;
 
-    FilePath testReportsDir;
-    OutputStream captureOutputStream;
-    TaskListener buildListener;
+    protected XCodeBuildOutputParser() {
+        super();
+    }
 
-    int exitCode;
-    TestSuite currentTestSuite;
-    TestCase currentTestCase;
-
-    public XCodeBuildOutputParser(FilePath workspace, TaskListener buildListener) throws IOException, InterruptedException {
-        this.buildListener = buildListener;
-        this.captureOutputStream = new LineBasedFilterOutputStream();
-
-        testReportsDir = workspace.child("test-reports");
-        testReportsDir.mkdirs();
+    /**
+     * Initalize the FilterOutputStream and prepare to generate the JUnit result files
+     * @param workspace directory that will receive the result files
+     * @param log the Xcode output stream that should be parsed
+     */
+    public XCodeBuildOutputParser(File workspace, OutputStream log) {
+        this();
+        this.captureOutputStream = new LineBasedFilterOutputStream(log);
+        this.testReportsDir = workspace;
     }
 
     public class LineBasedFilterOutputStream extends FilterOutputStream {
         StringBuilder buffer = new StringBuilder();
 
-        public LineBasedFilterOutputStream() {
-            super(buildListener.getLogger());
+        public LineBasedFilterOutputStream(OutputStream log) {
+            super(log);
         }
 
         @Override
@@ -92,7 +99,6 @@ public class XCodeBuildOutputParser {
                     handleLine(buffer.toString());
                     buffer = new StringBuilder();
                 } catch(Exception e) {  // Very fugly
-                    buildListener.fatalError(e.getMessage(), e);
                     throw new IOException(e);
                 }
             } else {
@@ -109,7 +115,7 @@ public class XCodeBuildOutputParser {
 
     private void requireTestSuite(String name) {
         requireTestSuite();
-        if(!currentTestSuite.getName().equals(name)) {
+        if(name == null || !name.endsWith(currentTestSuite.getName())) {
             throw new RuntimeException("Log statements out of sync: current test suite was '" + currentTestSuite.getName() + "' and not '" + name + "'");
         }
     }
@@ -122,23 +128,32 @@ public class XCodeBuildOutputParser {
         }
     }
 
-    private void writeTestReport() throws IOException, InterruptedException, JAXBException {
-        OutputStream testReportOutputStream = testReportsDir.child("TEST-" + currentTestSuite.getName() + ".xml").write();
-        JAXBContext jaxbContext = JAXBContext.newInstance(TestSuite.class);
-        Marshaller marshaller = jaxbContext.createMarshaller();
-        marshaller.marshal(currentTestSuite, testReportOutputStream);
+    private void writeTestReport() throws IOException, InterruptedException,
+            JAXBException {
+        OutputStream testReportOutputStream = outputForSuite();
+        try {
+            JAXBContext jaxbContext = JAXBContext.newInstance(TestSuite.class);
+            Marshaller marshaller = jaxbContext.createMarshaller();
+            marshaller.marshal(currentTestSuite, testReportOutputStream);
+        } finally {
+            testReportOutputStream.close();
+        }
+    }
 
+    protected OutputStream outputForSuite() throws IOException,
+            InterruptedException {
+        return new FileOutputStream(new File(testReportsDir, "TEST-" + currentTestSuite.getName() + ".xml"));
     }
 
     protected void handleLine(String line) throws ParseException, IOException, InterruptedException, JAXBException {
         Matcher m = START_SUITE.matcher(line);
-        if(m.find()) {
+        if(m.matches()) {
             currentTestSuite = new TestSuite(InetAddress.getLocalHost().getHostName(), m.group(1), dateFormat.parse(m.group(2)));
             return;
         }
 
         m = END_SUITE.matcher(line);
-        if(m.find()) {
+        if(m.matches()) {
             if(currentTestSuite==null) return; // if there is no current suite, do nothing
 
             currentTestSuite.setEndTime(dateFormat.parse(m.group(2)));
@@ -149,13 +164,13 @@ public class XCodeBuildOutputParser {
         }
 
         m = START_TESTCASE.matcher(line);
-        if(m.find()) {
+        if(m.matches()) {
             currentTestCase = new TestCase(currentTestSuite.getName(), m.group(1));
             return;
         }
 
         m = END_TESTCASE.matcher(line);
-        if(m.find()) {
+        if(m.matches()) {
             requireTestSuite();
             requireTestCase(m.group(1));
 
@@ -167,7 +182,7 @@ public class XCodeBuildOutputParser {
         }
 
         m = ERROR_TESTCASE.matcher(line);
-        if(m.find()) {
+        if(m.matches()) {
 
             String errorLocation = m.group(1);
             String testSuite = m.group(2);
@@ -183,7 +198,7 @@ public class XCodeBuildOutputParser {
         }
 
         m = FAILED_TESTCASE.matcher(line);
-        if(m.find()) {
+        if(m.matches()) {
             requireTestSuite();
             requireTestCase(m.group(1));
             currentTestSuite.addTest();
@@ -195,13 +210,32 @@ public class XCodeBuildOutputParser {
         }
 
         m = FAILED_WITH_EXIT_CODE.matcher(line);
-        if(m.find()) {
+        if(m.matches()) {
             exitCode = Integer.valueOf(m.group(1));
             return;
         }
 
-        if(line.contains("BUILD FAILED")) {
+        if(line.matches("BUILD FAILED") || line.matches("\\*\\* TEST FAILED \\*\\*")) {
             exitCode = -1;
+        }
+        
+        m = TERMINATING_EXCEPTION.matcher(line);
+        if(m.matches()) {
+            exitCode = -1;
+            
+            requireTestSuite();
+            if (currentTestCase != null) {
+                TestError error = new TestError(m.group(2), m.group(1));
+                currentTestCase.getErrors().add(error);
+                
+                currentTestSuite.getTestCases().add(currentTestCase);
+                currentTestSuite.addTest();
+                currentTestSuite.addError();
+                
+                currentTestCase = null;
+            }
+            writeTestReport();
+            currentTestSuite = null;
         }
     }
 
