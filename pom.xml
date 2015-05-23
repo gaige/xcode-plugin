@@ -28,11 +28,11 @@
   <parent>
     <groupId>org.jenkins-ci.plugins</groupId>
     <artifactId>plugin</artifactId>
-    <version>1.509</version>
+    <version>1.511</version>
     <relativePath />
   </parent>
   <artifactId>xcode-plugin</artifactId>
-  <version>1.4.9-SNAPSHOT</version>
+  <version>1.4.9-GBP</version>
   <packaging>hpi</packaging>
   <name>Xcode integration</name>
   <description>This plugin adds the ability to call Xcode command line tools to automate build and packaging iOS applications (iPhone, iPad, ...).</description>

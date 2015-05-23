@@ -104,6 +104,12 @@ public class DeveloperProfileLoader extends Builder {
             mp.copyTo(profiles.child(mp.getName()));
         }
 
+        // copy the OS X Profiles too
+        for (FilePath mp : secret.list("**/*.provisionprofile")) {
+            listener.getLogger().println("Installing  "+mp.getName());
+            mp.copyTo(profiles.child(mp.getName()));
+        }
+
         return true;
     }
 
